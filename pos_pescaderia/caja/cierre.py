@@ -5,14 +5,15 @@ from caja.detalle_egresos import obtener_detalle_egresos
 
 def cerrar_caja(id_usuario, monto_real_efectivo):
 
+    if monto_real_efectivo < 0:
+        raise Exception("El monto real no puede ser negativo")
+
     conn = get_connection()
     cur = conn.cursor()
 
     try:
-        # 1️⃣ Obtener caja abierta
         cur.execute("""
-            SELECT id_cierre, id_caja, monto_apertura,
-                   (fecha + hora_apertura) AS fecha_inicio
+            SELECT id_cierre, id_caja, monto_apertura
             FROM cierre_caja
             WHERE cerrado = FALSE
             ORDER BY id_cierre DESC
@@ -24,18 +25,19 @@ def cerrar_caja(id_usuario, monto_real_efectivo):
         if not row:
             raise Exception("No hay caja abierta")
 
-        id_cierre, id_caja, monto_apertura, fecha_inicio = row
+        id_cierre, id_caja, monto_apertura = row
 
-        # 2️⃣ Totales por método
+        # ==========================
+        # Movimientos
+        # ==========================
         cur.execute("""
             SELECT id_metodo,
-                   COALESCE(SUM(CASE WHEN tipo='INGRESO' THEN monto END),0) AS ingresos,
-                   COALESCE(SUM(CASE WHEN tipo='EGRESO' THEN monto END),0) AS egresos
+                   COALESCE(SUM(CASE WHEN tipo='INGRESO' THEN monto ELSE 0 END),0),
+                   COALESCE(SUM(CASE WHEN tipo='EGRESO' THEN monto ELSE 0 END),0)
             FROM caja_movimientos
             WHERE id_cierre = %s
-            AND fecha >= %s
             GROUP BY id_metodo
-        """, (id_cierre, fecha_inicio))
+        """, (id_cierre,))
 
         resultados = cur.fetchall()
 
@@ -58,32 +60,23 @@ def cerrar_caja(id_usuario, monto_real_efectivo):
 
         saldo_sistema = monto_apertura + total_ingresos - total_egresos
         efectivo_sistema = monto_apertura + efectivo_ing - efectivo_egr
+
         diferencia = monto_real_efectivo - efectivo_sistema
 
-        # 3️⃣ Total ventas
+        # ==========================
+        # Total ventas FINALIZADAS
+        # ==========================
         cur.execute("""
             SELECT COALESCE(SUM(total),0)
             FROM ventas
             WHERE id_cierre = %s
+            AND estado = 'FINALIZADA'
         """, (id_cierre,))
         total_ventas = cur.fetchone()[0]
 
-        # 4️⃣ Detalle egresos
-        cur.execute("""
-            SELECT concepto, monto
-            FROM caja_movimientos
-            WHERE id_cierre = %s
-            AND tipo = 'EGRESO'
-            AND fecha >= %s
-            ORDER BY fecha
-        """, (id_cierre, fecha_inicio))
-
-        detalle_egresos = [
-            {"concepto": r[0], "monto": r[1]}
-            for r in cur.fetchall()
-        ]
-
-        # 5️⃣ Update cierre
+        # ==========================
+        # Update
+        # ==========================
         cur.execute("""
             UPDATE cierre_caja
             SET
@@ -116,7 +109,7 @@ def cerrar_caja(id_usuario, monto_real_efectivo):
 
         conn.commit()
 
-    except Exception:
+    except:
         conn.rollback()
         raise
     finally:
@@ -126,16 +119,10 @@ def cerrar_caja(id_usuario, monto_real_efectivo):
         "id_cierre": id_cierre,
         "monto_apertura": monto_apertura,
         "total_ventas": total_ventas,
-        "total_ingresos": total_ingresos,
-        "total_egresos": total_egresos,
         "saldo_sistema": saldo_sistema,
         "efectivo_sistema": efectivo_sistema,
         "monto_cierre": monto_real_efectivo,
-        "diferencia": diferencia,
-        "efectivo": efectivo_ing,
-        "tarjeta": tarjeta_ing,
-        "sinpe": sinpe_ing,
-        "detalle_egresos": detalle_egresos
+        "diferencia": diferencia
     }
 
 

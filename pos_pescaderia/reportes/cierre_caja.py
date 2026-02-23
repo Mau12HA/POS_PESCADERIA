@@ -1,5 +1,6 @@
 from config.database import get_connection
-from db.queries import fetch_one
+from db import fetch_one
+
 
 
 

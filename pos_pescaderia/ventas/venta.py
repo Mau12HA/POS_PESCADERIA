@@ -56,10 +56,12 @@ def registrar_venta_completa(
         for d in detalles:
             precio = d["precio"]
 
-            if d["kg"] is not None:
+            if d.get("kg"):
                 subtotal = d["kg"] * precio
-            else:
+            elif d.get("unidades"):
                 subtotal = d["unidades"] * precio
+            else:
+                raise ValueError("Producto sin cantidad válida")
 
             d["subtotal"] = subtotal
             total += subtotal
@@ -69,10 +71,12 @@ def registrar_venta_completa(
         # =========================
         total_pagos = sum(p["monto"] for p in pagos)
 
-        if abs(total_pagos - total) > 1:
+        if total_pagos < total:
             raise ValueError(
-                f"Pagos ₡{total_pagos:,.0f} no coinciden con total ₡{total:,.0f}"
+                f"Pagos insuficientes ₡{total_pagos:,.0f} para total ₡{total:,.0f}"
             )
+
+        vuelto = total_pagos - total
 
         # =========================
         # 3️⃣ Insertar venta
@@ -85,6 +89,7 @@ def registrar_venta_completa(
 
         id_venta = cur.fetchone()[0]
 
+
         # =========================
         # 4️⃣ Insertar detalle + descontar stock
         # =========================
@@ -95,9 +100,55 @@ def registrar_venta_completa(
             precio = d["precio"]
             subtotal = d["subtotal"]
 
+            # =========================
+            # VALIDACIÓN TIPO DE VENTA
+            # =========================
+
+            # Obtener tipo de venta del producto
+            cur.execute("SELECT tipo_venta FROM productos WHERE id = %s", (d["id_producto"],))
+            producto = cur.fetchone()
+
+            if not producto:
+                raise ValueError("Producto no encontrado.")
+
+            tipo_venta = producto[0]  # "KG" o "UNIDAD"
+
+            # Convertir a Decimal si viene como string
+            from decimal import Decimal
+
+            if kg is not None:
+                kg = Decimal(str(kg))
+
+            if unidades is not None:
+                unidades = Decimal(str(unidades))
+
+            # =========================
+            # REGLAS DE NEGOCIO
+            # =========================
+
+            if tipo_venta == "KG":
+                if unidades and unidades != 0:
+                    raise ValueError("Este producto se vende solo por KG.")
+
+                if not kg or kg <= 0:
+                    raise ValueError("Debe ingresar cantidad en KG.")
+
+                # Permitir decimales → OK
+
+            elif tipo_venta == "UNIDAD":
+                if kg and kg != 0:
+                    raise ValueError("Este producto se vende solo por UNIDADES.")
+
+                if not unidades or unidades <= 0:
+                    raise ValueError("Debe ingresar cantidad en UNIDADES.")
+
+                # 🚫 NO permitir decimales
+                if unidades % 1 != 0:
+                    raise ValueError("Las UNIDADES no pueden tener decimales.")
+
             cur.execute("""
                 INSERT INTO detalle_ventas
-                (id_venta, id_producto, kg, unidades, precio_unitario, subtotal)
+                (id_venta, id_producto, cantidad_kg, cantidad_unidades, precio_unitario, subtotal)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 id_venta,
@@ -145,6 +196,37 @@ def registrar_venta_completa(
                 id_venta,
                 p["id_metodo"]
             ))
+
+        # =========================
+        # 6️⃣B Registrar vuelto si existe
+        # =========================
+        if vuelto > 0:
+
+            # Solo si hubo pago en efectivo
+            pago_efectivo = next(
+                (p for p in pagos if p["id_metodo"] == 1),
+                None
+            )
+
+            if not pago_efectivo:
+                raise ValueError(
+                    "No se puede generar vuelto sin pago en efectivo."
+                )
+
+            cur.execute("""
+                INSERT INTO caja_movimientos
+                (id_caja, id_cierre, tipo, concepto, monto, id_venta, id_metodo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (
+                id_caja,
+                id_cierre,
+                "EGRESO",
+                f"VUELTO VENTA {id_venta}",
+                vuelto,
+                id_venta,
+                1  # efectivo
+            ))
+
 
         # =========================
         # 7️⃣ Commit final
